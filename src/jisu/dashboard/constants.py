@@ -47,6 +47,24 @@ GBRAIN_HOME_DIRNAME = "gbrain"
 GBRAIN_PROVENANCE = "reachy-mini conversation (remember tool)"
 GBRAIN_FORGET_REASON = "user asked the robot to forget"
 
+# --- GBrain embeddings (opt-in) ----------------------------------------------------
+# The vector column length is fixed at `gbrain init`, so model + dimensions are chosen up front.
+DEFAULT_GBRAIN_EMBEDDING_MODEL = "google:gemini-embedding-2"
+DEFAULT_GBRAIN_EMBEDDING_DIMS = 768
+# GBrain reads the Google key from this variable; the conversation app's GEMINI_API_KEY is reused.
+GBRAIN_EMBEDDING_KEY_ENV = "GOOGLE_GENERATIVE_AI_API_KEY"
+GBRAIN_EMBEDDING_KEY_FALLBACK_ENV = "GEMINI_API_KEY"
+
+# --- GBrain resident HTTP server (`gbrain serve --http`) ------------------------------
+GBRAIN_HTTP_HOST = "127.0.0.1"
+# Only the memory verbs (remember / recall / forget ...) are needed.
+GBRAIN_HTTP_SURFACE = "verbs"
+GBRAIN_HTTP_TOKEN_NAME = "jisu-memory"
+GBRAIN_HTTP_STARTUP_TIMEOUT_S = 60.0
+GBRAIN_HTTP_POLL_INTERVAL_S = 0.25
+GBRAIN_HTTP_STOP_TIMEOUT_S = 10.0
+GBRAIN_HTTP_LOG_NAME = "serve-http.log"
+
 # --- external tools (src/jisu/tools, e.g. update_persona) -----------------------
 EXTERNAL_TOOLS_DIR_ENV = "REACHY_MINI_EXTERNAL_TOOLS_DIRECTORY"
 AUTOLOAD_EXTERNAL_TOOLS_ENV = "AUTOLOAD_EXTERNAL_TOOLS"

@@ -14,6 +14,11 @@ Facts saved before categories existed have no entity and read back as user facts
 Each instance gets its own brain under ``GBRAIN_HOME=<data dir>/gbrain`` (GBrain
 appends ``.gbrain``), initialized keyless with PGLite (``init --pglite
 --no-embedding``), so it never touches the user's personal ``~/.gbrain``.
+Pass an :class:`EmbeddingConfig` to initialize it with an embedding model instead.
+
+Every CLI call runs with the brain home as its working directory: GBrain reads a
+``.env`` from the current directory, and the repository's ``.env`` holds the
+app's paid API keys.
 
 Note: GBrain ``forget`` withdraws a claim; remembering the exact same text again
 is refused (``fact_withdrawn``) and ``add_fact`` then returns None.
@@ -47,6 +52,8 @@ from jisu.dashboard.constants import (
     GBRAIN_FORGET_REASON,
     GBRAIN_INIT_TIMEOUT_S,
     DEFAULT_GBRAIN_TIMEOUT_S,
+    GBRAIN_EMBEDDING_KEY_ENV,
+    GBRAIN_EMBEDDING_KEY_FALLBACK_ENV,
 )
 from jisu.dashboard.memory.base import (
     BackendUnavailableError,
@@ -89,15 +96,33 @@ class NativeSearch:
     degraded_reason: str = ""
 
 
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Embedding model a brain is initialized with (fixed for the brain's lifetime)."""
+
+    model: str
+    dimensions: int
+
+    def init_args(self) -> list[str]:
+        """``gbrain init`` flags selecting this model."""
+        return ["--embedding-model", self.model, "--embedding-dimensions", str(self.dimensions)]
+
+
 class GBrainCallError(RuntimeError):
     """Raised when a GBrain CLI call fails or returns an error envelope."""
 
 
 def run_command(args: Sequence[str], env: Mapping[str, str], timeout_s: float) -> CommandResult:
-    """Run a command and capture its output (default :data:`CommandRunner`)."""
+    """Run a command and capture its output (default :data:`CommandRunner`).
+
+    Runs inside ``env["GBRAIN_HOME"]`` when that folder exists, so GBrain never
+    picks up a ``.env`` from the caller's working directory.
+    """
+    home = env.get("GBRAIN_HOME", "")
     completed = subprocess.run(
         list(args),
         env=dict(env),
+        cwd=home if home and os.path.isdir(home) else None,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -209,6 +234,35 @@ def resolve_gbrain_binary(configured: str) -> str:
     return configured
 
 
+def find_embedding_key(dotenv_path: Path | None = None) -> tuple[str, str] | None:
+    """Find the Google key GBrain's embedding model needs: ``(key, where it came from)`` or None.
+
+    Order: ``GOOGLE_GENERATIVE_AI_API_KEY``, then the app's ``GEMINI_API_KEY``,
+    each from the environment first and then from ``dotenv_path`` (only these
+    two names are read from that file). The source names the variable, never the value.
+    """
+    names = (GBRAIN_EMBEDDING_KEY_ENV, GBRAIN_EMBEDDING_KEY_FALLBACK_ENV)
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value, f"환경변수 {name}"
+    if dotenv_path is not None and dotenv_path.is_file():
+        from dotenv import dotenv_values
+
+        values = dotenv_values(dotenv_path)
+        for name in names:
+            value = (values.get(name) or "").strip()
+            if value:
+                return value, f"{dotenv_path} 의 {name}"
+    return None
+
+
+def resolve_embedding_key(dotenv_path: Path | None = None) -> str | None:
+    """Return just the key from :func:`find_embedding_key`."""
+    found = find_embedding_key(dotenv_path)
+    return found[0] if found else None
+
+
 def _error_detail(payload: Mapping[str, Any]) -> str:
     """Render a GBrain error envelope (``{error, code, message}``) as ``code: message``."""
     code = payload.get("code") or payload.get("error")
@@ -241,12 +295,18 @@ class GBrainMemoryBackend:
         home: Path | None = None,
         timeout_s: float | None = None,
         require_ready: bool = True,
+        embedding: EmbeddingConfig | None = None,
+        extra_env: Mapping[str, str] | None = None,
     ) -> None:
         """Bind to one brain; raise :class:`BackendUnavailableError` if it is not usable.
 
         ``require_ready=False`` skips the binary/initialization checks (used to run
-        :meth:`initialize` from the dashboard).
+        :meth:`initialize` from the dashboard). ``embedding`` only matters for
+        :meth:`initialize`; ``extra_env`` is added to every call's environment
+        (e.g. the embedding API key).
         """
+        self.embedding = embedding
+        self._extra_env = dict(extra_env or {})
         self._runner: CommandRunner = runner or run_command
         configured = binary or os.getenv(GBRAIN_BIN_ENV, "").strip() or DEFAULT_GBRAIN_BIN
         self._binary = configured if runner is not None else resolve_gbrain_binary(configured)
@@ -293,14 +353,20 @@ class GBrainMemoryBackend:
         return result.stdout.strip() if result.returncode == 0 else ""
 
     def initialize(self) -> str:
-        """Create the keyless PGLite brain (idempotent). Return the CLI output."""
+        """Create the PGLite brain (idempotent), keyless unless :attr:`embedding` is set. Return the CLI output."""
         self.home.mkdir(parents=True, exist_ok=True)
+        embedding_args = self.embedding.init_args() if self.embedding else ["--no-embedding"]
+        logger.info(
+            "gbrain init: %s (%s)",
+            self.home,
+            f"임베딩 {self.embedding.model}" if self.embedding else "임베딩 없음",
+        )
         result = self._runner(
             [
                 self._binary,
                 "init",
                 "--pglite",
-                "--no-embedding",
+                *embedding_args,
                 "--search-mode",
                 GBRAIN_SEARCH_MODE,
                 "--non-interactive",
@@ -318,6 +384,7 @@ class GBrainMemoryBackend:
 
     def _env(self) -> dict[str, str]:
         env = {key: value for key, value in os.environ.items() if key not in _ISOLATION_DROPPED_ENV}
+        env.update(self._extra_env)
         env["GBRAIN_HOME"] = str(self.home)
         # gbrain is a `#!/usr/bin/env bun` script: make sure bun resolves even when the
         # dashboard was started from a shell whose PATH lacks ~/.bun/bin.
@@ -351,6 +418,9 @@ class GBrainMemoryBackend:
         if payload.get("error"):
             raise GBrainCallError(f"gbrain {op} error: {_error_detail(payload)[:500]}")
         return payload
+
+    def close(self) -> None:
+        """Release resources; the CLI backend holds none."""
 
     @staticmethod
     def _facts_from_payload(payload: Mapping[str, Any]) -> list[CategorizedFact]:
