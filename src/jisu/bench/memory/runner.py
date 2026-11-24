@@ -17,6 +17,7 @@ from dataclasses import field, asdict, dataclass
 from collections.abc import Callable
 
 from jisu.bench.memory.report import BenchReport, SubjectResult, SkippedSubject
+from jisu.dashboard.constants import DEFAULT_GBRAIN_EMBEDDING_DIMS, DEFAULT_GBRAIN_EMBEDDING_MODEL
 from jisu.bench.memory.dataset import Dataset, BenchQuery, match_key, load_dataset
 from jisu.bench.memory.metrics import (
     QueryResult,
@@ -25,9 +26,19 @@ from jisu.bench.memory.metrics import (
     scores_by_tag,
     summarize_latency,
 )
-from jisu.bench.memory.subjects import Subject, GBrainFactory, GBrainSubject, build_subject, create_gbrain
+from jisu.bench.memory.subjects import (
+    Subject,
+    GBrainFactory,
+    GBrainSubject,
+    GBrainFactories,
+    build_subject,
+    create_gbrain,
+    create_http_gbrain,
+    embedded_gbrain_factory,
+)
 from jisu.dashboard.memory.base import BackendUnavailableError
-from jisu.bench.memory.constants import DEFAULT_K, SUBJECT_NAMES, DEFAULT_REPEAT, DEFAULT_DATASET
+from jisu.bench.memory.constants import DEFAULT_K, DEFAULT_REPEAT, DEFAULT_DATASET, DEFAULT_SUBJECTS
+from jisu.dashboard.memory.gbrain_backend import EmbeddingConfig
 
 
 @dataclass(frozen=True)
@@ -35,10 +46,13 @@ class BenchConfig:
     """What to run."""
 
     dataset: Path = DEFAULT_DATASET
-    subjects: tuple[str, ...] = SUBJECT_NAMES
+    subjects: tuple[str, ...] = DEFAULT_SUBJECTS
     k: int = DEFAULT_K
     # Search passes per query; accuracy uses the first, latency uses all of them.
     repeat: int = DEFAULT_REPEAT
+    # Used by the gbrain-embed* subjects only.
+    embedding_model: str = DEFAULT_GBRAIN_EMBEDDING_MODEL
+    embedding_dims: int = DEFAULT_GBRAIN_EMBEDDING_DIMS
 
     def __post_init__(self) -> None:
         """Reject values that would make the numbers meaningless."""
@@ -48,14 +62,26 @@ class BenchConfig:
             raise ValueError("repeat must be at least 1")
         if not self.subjects:
             raise ValueError("at least one subject is required")
+        if self.embedding_dims < 1:
+            raise ValueError("embedding_dims must be at least 1")
+
+    @property
+    def embedding(self) -> EmbeddingConfig:
+        """Embedding model for the gbrain-embed* subjects."""
+        return EmbeddingConfig(self.embedding_model, self.embedding_dims)
 
 
 @dataclass(frozen=True)
 class BenchEvent:
     """Progress notification.
 
-    ``kind`` is one of: ``subject_start``, ``subject_ready``, ``fact_added``, ``query_done``,
-    ``subject_done``, ``subject_skipped``. ``done``/``total`` count facts or queries.
+    ``kind`` is one of (in order): ``run_start``, then per subject ``subject_start``,
+    ``subject_ready`` | ``subject_skipped``, ``fact_added``×N, ``query_done``×M,
+    ``prompt_done``, ``subject_done``.
+
+    - ``done``/``total`` count facts or queries (``run_start``: subjects).
+    - ``elapsed_ms``: that fact's save, that query's first search, the prompt build, or the subject's setup.
+    - ``query``: the scored query (``query_done``); ``result``: the subject's results (``subject_done``).
     """
 
     kind: str
@@ -63,6 +89,10 @@ class BenchEvent:
     done: int = 0
     total: int = 0
     message: str = ""
+    elapsed_ms: float = 0.0
+    ok: bool = True
+    query: QueryResult | None = None
+    result: SubjectResult | None = None
 
 
 EventHandler = Callable[[BenchEvent], None]
@@ -94,14 +124,13 @@ def _measure_subject(subject: Subject, dataset: Dataset, config: BenchConfig, em
     samples = _Samples()
     added = failed = 0
     for index, fact in enumerate(dataset.facts, start=1):
-        started = time.perf_counter()
-        ok = subject.add(fact)
-        samples.add.append((time.perf_counter() - started) * 1000.0)
+        ok, elapsed = _timed_ms(lambda: subject.add(fact))
+        samples.add.append(elapsed)
         if ok:
             added += 1
         else:
             failed += 1
-        emit(BenchEvent("fact_added", subject.name, index, len(dataset.facts)))
+        emit(BenchEvent("fact_added", subject.name, index, len(dataset.facts), fact.id, elapsed, ok))
 
     category_match: float | None = None
     if subject.categorized:
@@ -118,10 +147,22 @@ def _measure_subject(subject: Subject, dataset: Dataset, config: BenchConfig, em
         samples.search.append(result.latency_ms)
         for _ in range(config.repeat - 1):
             samples.search.append(_run_query(subject, dataset_ids, query, config.k).latency_ms)
-        emit(BenchEvent("query_done", subject.name, index, len(dataset.queries)))
+        emit(
+            BenchEvent(
+                "query_done",
+                subject.name,
+                index,
+                len(dataset.queries),
+                query.id,
+                result.latency_ms,
+                result.passed,
+                query=result,
+            )
+        )
 
     for _ in range(config.repeat):
         samples.prompt.append(_timed_ms(subject.format_prompt)[1])
+    emit(BenchEvent("prompt_done", subject.name, config.repeat, config.repeat, elapsed_ms=samples.prompt[0]))
 
     return SubjectResult(
         name=subject.name,
@@ -156,16 +197,35 @@ def run_memory_bench(
     on_event: EventHandler | None = None,
     workdir: Path | None = None,
     gbrain_factory: GBrainFactory = create_gbrain,
+    embed_factory: GBrainFactory | None = None,
+    http_factory: GBrainFactory = create_http_gbrain,
+    dotenv_path: Path | None = None,
 ) -> BenchReport:
     """Run every subject on the dataset and return the report (not saved).
 
     Each subject gets a fresh store under ``workdir`` (a temporary directory,
-    removed afterwards, when not given). A subject that cannot start is recorded
-    in ``report.skipped``; the others still run. Raises
-    :class:`~jisu.bench.memory.dataset.DatasetError` for a bad dataset.
+    removed afterwards, when not given) and is closed after it is measured. A
+    subject that cannot start is recorded in ``report.skipped``; the others
+    still run. Raises :class:`~jisu.bench.memory.dataset.DatasetError` for a bad
+    dataset. ``dotenv_path`` is where the gbrain-embed* subjects look for an API
+    key when the environment has none.
     """
     emit: EventHandler = on_event or (lambda _event: None)
     dataset = load_dataset(config.dataset)
+    emit(
+        BenchEvent(
+            "run_start",
+            "",
+            0,
+            len(config.subjects),
+            f"{dataset.name}: facts {len(dataset.facts)}, queries {len(dataset.queries)}",
+        )
+    )
+    factories = GBrainFactories(
+        keyless=gbrain_factory,
+        embedded=embed_factory or embedded_gbrain_factory(config.embedding, dotenv_path),
+        http=http_factory,
+    )
     started_at = datetime.now().astimezone()
     clock = time.perf_counter()
     results: list[SubjectResult] = []
@@ -178,16 +238,24 @@ def run_memory_bench(
         for name in config.subjects:
             emit(BenchEvent("subject_start", name))
             try:
-                subject = build_subject(name, root / name, gbrain_factory)
+                subject = build_subject(name, root / name, factories)
             except (KeyError, BackendUnavailableError) as exc:
                 reason = str(exc.args[0]) if exc.args else str(exc)
                 skipped.append(SkippedSubject(name, reason))
                 emit(BenchEvent("subject_skipped", name, message=reason))
                 continue
-            emit(BenchEvent("subject_ready", name, message=f"setup {subject.setup_ms:.0f} ms"))
+            emit(
+                BenchEvent(
+                    "subject_ready", name, message=f"setup {subject.setup_ms:.0f} ms", elapsed_ms=subject.setup_ms
+                )
+            )
             ran.append(subject)
-            results.append(_measure_subject(subject, dataset, config, emit))
-            emit(BenchEvent("subject_done", name))
+            try:
+                result = _measure_subject(subject, dataset, config, emit)
+            finally:
+                subject.close()
+            results.append(result)
+            emit(BenchEvent("subject_done", name, result=result))
         environment = _environment(ran)
 
     return BenchReport(

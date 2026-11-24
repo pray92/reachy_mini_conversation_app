@@ -92,7 +92,11 @@ def test_json_subject_scores(dataset: Path, tmp_path: Path) -> None:
     assert report.dataset == {"name": "mini", "title": "mini", "path": str(dataset), "facts": 2, "queries": 4}
 
     kinds = [event.kind for event in events]
-    assert kinds[:2] == ["subject_start", "subject_ready"] and kinds[-1] == "subject_done"
+    assert kinds[:3] == ["run_start", "subject_start", "subject_ready"]
+    assert kinds[-2:] == ["prompt_done", "subject_done"]
+    assert events[-1].result is not None and events[-1].result.name == "json"
+    query_events = [event for event in events if event.kind == "query_done"]
+    assert all(event.query is not None for event in query_events)
     assert kinds.count("fact_added") == 2 and kinds.count("query_done") == 4
 
 
@@ -152,3 +156,62 @@ def test_gbrain_init_errors_are_shortened() -> None:
     envelope = 'gbrain init failed (exit 1): {"error": "local_conflict", "message": "not a real directory"}\nmore'
     assert _short_gbrain_error(envelope) == "gbrain init failed (local_conflict): not a real directory"
     assert _short_gbrain_error("boom\nsecond line") == "boom"
+
+
+def test_embed_subjects_use_embed_factory(dataset: Path, tmp_path: Path) -> None:
+    """gbrain-embed* get their own brains from the embedding factory; the report records the model."""
+    fakes: list[FakeGBrain] = []
+    report = run_memory_bench(
+        BenchConfig(
+            dataset=dataset,
+            subjects=("gbrain-embed", "gbrain-embed-native"),
+            repeat=1,
+            embedding_dims=1024,
+        ),
+        workdir=tmp_path / "work",
+        embed_factory=_fake_factory(fakes),
+    )
+    assert [s.name for s in report.subjects] == ["gbrain-embed", "gbrain-embed-native"]
+    assert len(fakes) == 2
+    assert report.config["embedding_dims"] == 1024
+
+
+def test_embed_subject_skipped_without_key(dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no key in the environment or the .env file, gbrain-embed is skipped, not failed."""
+    monkeypatch.delenv("GOOGLE_GENERATIVE_AI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    report = run_memory_bench(
+        BenchConfig(dataset=dataset, subjects=("json", "gbrain-embed"), repeat=1),
+        workdir=tmp_path / "work",
+        dotenv_path=tmp_path / "missing.env",
+    )
+    assert [s.name for s in report.subjects] == ["json"]
+    [skipped] = report.skipped
+    assert skipped.name == "gbrain-embed" and "GEMINI_API_KEY" in skipped.reason
+
+
+def test_http_subject_is_closed(dataset: Path, tmp_path: Path) -> None:
+    """The http subject's backend is closed after measuring (stops the server)."""
+    closed: list[str] = []
+    fakes: list[FakeGBrain] = []
+    build = _fake_factory(fakes)
+
+    def http_factory(home: Path) -> GBrainMemoryBackend:
+        brain = build(home)
+        brain.close = lambda: closed.append(str(home))  # type: ignore[method-assign]
+        return brain
+
+    report = run_memory_bench(
+        BenchConfig(dataset=dataset, subjects=("gbrain-http",), repeat=1),
+        workdir=tmp_path / "work",
+        http_factory=http_factory,
+    )
+    assert [s.name for s in report.subjects] == ["gbrain-http"]
+    assert len(closed) == 1
+
+
+def test_default_subjects_stay_keyless() -> None:
+    """Subjects needing a key or a server are opt-in."""
+    assert BenchConfig().subjects == ("json", "gbrain", "gbrain-native")
+    with pytest.raises(ValueError):
+        BenchConfig(embedding_dims=0)
