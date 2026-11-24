@@ -31,3 +31,24 @@ def test_no_save_and_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert main(["--subjects", "json", "--k", "0"]) == EXIT_NOTHING_RAN
     assert main(["--show", str(tmp_path / "missing.json")]) == EXIT_NOTHING_RAN
     assert "error:" in capsys.readouterr().err
+
+
+def test_run_log_saved_and_shown(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The progress log is saved next to the report (even with --quiet) and --show prints it first."""
+    out = tmp_path / "out"
+    assert main(["--subjects", "json", "--repeat", "1", "--out", str(out), "--quiet"]) == EXIT_OK
+    assert "━━" not in capsys.readouterr().out  # --quiet: nothing on screen
+    [saved] = list(out.glob("*.json"))
+    log = saved.with_suffix(".log")
+    assert "━━ [1/1] json" in log.read_text(encoding="utf-8")
+
+    assert main(["--show", str(saved)]) == EXIT_OK
+    shown = capsys.readouterr().out
+    assert shown.index("━━ [1/1] json") < shown.index("hit@5")
+
+    assert main(["--show", str(saved), "--quiet"]) == EXIT_OK
+    assert "━━" not in capsys.readouterr().out
+
+    log.unlink()  # reports saved before logs existed still show
+    assert main(["--show", str(saved)]) == EXIT_OK
+    assert "hit@5" in capsys.readouterr().out

@@ -23,7 +23,7 @@ python -m jisu.bench.memory --dataset my.toml --no-save
 # 지금까지 저장된 결과 파일 목록을 최신순으로 보여 준다(측정은 하지 않음).
 python -m jisu.bench.memory --list
 
-# 저장된 결과 파일 하나를 표로 다시 출력한다(측정은 하지 않음).
+# 저장된 결과 파일 하나를 다시 출력한다(측정은 하지 않음). 실행 로그(.log)가 있으면 그것부터 보여 준다.
 python -m jisu.bench.memory --show <파일>
 ```
 
@@ -31,7 +31,8 @@ python -m jisu.bench.memory --show <파일>
   - 대상 설명, 준비 단계(`·` 줄: brain 생성, 토큰 발급, 서버 시작, 키 출처), 저장 진행(10개마다 평균 시간)
   - 질문 한 줄씩: `[O]` 맞힘 / `[X]` 틀림, 정답 순위나 대신 나온 사실 id, 첫 검색 시간
   - 마지막 `결과:` 줄에 hit@k · 유의어 · 오탐 · 검색 p50 요약
-  - `--brief`: 틀린 질문만 출력 · `--quiet`: 로그 없이 최종 표만 출력
+  - `--brief`: 틀린 질문만 출력 · `--quiet`: 화면에는 최종 표만 출력
+  - 로그는 결과 JSON 옆에 같은 이름의 `.log`로 저장된다(`--quiet`여도 저장). `--show`가 로그 → 표 순서로 다시 보여 주고, `--show ... --quiet`면 표만 나온다. 이 기능 전에 저장한 결과는 로그 없이 표만 나온다.
 - gbrain 대상은 `gbrain` 실행 파일이 필요하다 (`src/jisu/dashboard/README.md`의 GBrain 설정 참고). 없으면 그 대상만 `skipped`로 남고 나머지는 실행된다.
 - 대상마다 임시 폴더에 새 저장소를 만들고, 끝나면 지운다. 사용자의 실제 기억(앱 데이터·`JISU_GBRAIN_HOME`)은 건드리지 않는다.
 - gbrain 대상은 호출 하나가 subprocess라서 기본 설정 전체 실행에 약 3분이 걸린다. `--repeat 1`로 줄일 수 있다.

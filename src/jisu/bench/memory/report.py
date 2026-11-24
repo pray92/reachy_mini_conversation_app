@@ -143,6 +143,27 @@ def save_report(report: BenchReport, directory: Path | None = None) -> Path:
     return path
 
 
+def report_log_path(report_path: Path) -> Path:
+    """Return where a report's run log lives: ``<report>.log``."""
+    return Path(report_path).with_suffix(".log")
+
+
+def save_report_log(report_path: Path, text: str) -> Path:
+    """Write the run's progress log next to the report and return its path."""
+    path = report_log_path(report_path)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def load_report_log(report_path: Path) -> str | None:
+    """Return the progress log saved with a report, or None if there is none."""
+    path = report_log_path(report_path)
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def load_report(path: Path) -> BenchReport:
     """Read a saved report (raises ReportError)."""
     try:
