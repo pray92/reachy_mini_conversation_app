@@ -63,7 +63,8 @@ python -m jisu.dashboard  (FastAPI :7870)
 
 ## GBrain 백엔드 설정
 
-GBrain 소스는 git submodule로 `vendor/gbrain`에 있다(`robertchoi/gbrain`, Bun/TypeScript).
+GBrain 소스는 git submodule로 `vendor/gbrain`에 있다(공식 `garrytan/gbrain`, Bun/TypeScript).
+버전은 **0.60.740.0**(`v0.60.740.0` 태그)으로 고정한다. 임베딩 실험팀과 같은 버전이다. 버전을 바꿀 때는 서브모듈 커밋을 바꾸는 PR로 팀이 함께 올린다.
 
 ```bash
 git submodule update --init vendor/gbrain     # 처음 clone 했을 때
@@ -74,8 +75,16 @@ curl -fsSL https://bun.sh/install | bash                  # macOS / Linux
 powershell -c "irm bun.sh/install.ps1 | iex"              # Windows
 
 cd vendor/gbrain && bun install && bun link   # `gbrain` 명령이 PATH에 생긴다
-gbrain --version
+gbrain --version                              # gbrain 0.60.740.0
 ```
+
+- 이미 받아 둔 저장소에서 서브모듈 버전이 바뀌었으면(`git pull` 후 `git status`에 `vendor/gbrain`이 보이면) 다시 맞춘다.
+  ```bash
+  git submodule sync vendor/gbrain && git submodule update --init vendor/gbrain
+  cd vendor/gbrain && bun install && bun link
+  ```
+- 저장소 없이 공식 설치본을 쓰는 경우는 버전을 명시한다: `bun install -g github:garrytan/gbrain#v0.60.740.0`. `#stable`은 계속 올라가므로(2026-11-26 기준 0.60.772) 쓰지 않는다.
+- 이전 버전으로 만든 브레인은 그대로 열린다. 0.60.687 → 0.60.740에서 마이그레이션 없이 기억·카테고리가 읽히는 것을 확인했다. 확인하려면 `GBRAIN_HOME=<브레인 위치> gbrain doctor`.
 
 그다음 대시보드 기억 패널에서 백엔드를 `GBrain`으로 고른다. **GBrain 초기화** 버튼을 누르고, **적용 (앱 재시작)**을 누른다.
 

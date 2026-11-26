@@ -33,7 +33,7 @@ python -m jisu.bench.memory --show <파일>
   - 마지막 `결과:` 줄에 hit@k · 유의어 · 오탐 · 검색 p50 요약
   - `--brief`: 틀린 질문만 출력 · `--quiet`: 화면에는 최종 표만 출력
   - 로그는 결과 JSON 옆에 같은 이름의 `.log`로 저장된다(`--quiet`여도 저장). `--show`가 로그 → 표 순서로 다시 보여 주고, `--show ... --quiet`면 표만 나온다. 이 기능 전에 저장한 결과는 로그 없이 표만 나온다.
-- gbrain 대상은 `gbrain` 실행 파일이 필요하다 (`src/jisu/dashboard/README.md`의 GBrain 설정 참고). 없으면 그 대상만 `skipped`로 남고 나머지는 실행된다.
+- gbrain 대상은 `gbrain` 실행 파일이 필요하다 (`src/jisu/dashboard/README.md`의 GBrain 설정 참고). 기준 버전은 서브모듈이 고정한 0.60.740.0이고, 결과 표 위에 실제 실행한 버전이 찍힌다. 없으면 그 대상만 `skipped`로 남고 나머지는 실행된다.
 - 대상마다 임시 폴더에 새 저장소를 만들고, 끝나면 지운다. 사용자의 실제 기억(앱 데이터·`JISU_GBRAIN_HOME`)은 건드리지 않는다.
 - gbrain 대상은 호출 하나가 subprocess라서 기본 설정 전체 실행에 약 3분이 걸린다. `--repeat 1`로 줄일 수 있다.
 - 종료 코드: 0 = 정상, 2 = 데이터셋·설정 오류이거나 실행된 대상이 없음.
