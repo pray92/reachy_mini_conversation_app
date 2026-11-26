@@ -88,7 +88,13 @@ def _scores(raw: dict[str, Any]) -> Scores:
 
 def _query(raw: dict[str, Any]) -> QueryResult:
     return QueryResult(
-        **{**raw, "tags": tuple(raw["tags"]), "expected": tuple(raw["expected"]), "returned": tuple(raw["returned"])}
+        **{
+            **raw,
+            "tags": tuple(raw["tags"]),
+            "expected": tuple(raw["expected"]),
+            "returned": tuple(raw["returned"]),
+            "scores": tuple(raw.get("scores", ())),
+        }
     )
 
 

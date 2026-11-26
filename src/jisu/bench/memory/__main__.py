@@ -17,6 +17,7 @@ from typing import TextIO, cast
 from pathlib import Path
 from collections.abc import Sequence
 
+from jisu.bench.memory.sweep import parse_sweep, render_sweep
 from jisu.bench.memory.table import render_report, render_report_list
 from jisu.bench.memory.report import (
     ReportError,
@@ -32,6 +33,7 @@ from jisu.bench.memory.dataset import DatasetError
 from jisu.bench.memory.progress import ProgressPrinter, remove_log_handler, install_log_handler
 from jisu.bench.memory.constants import (
     DEFAULT_K,
+    DEFAULT_SWEEP,
     SUBJECT_NAMES,
     DEFAULT_REPEAT,
     DEFAULT_DATASET,
@@ -59,6 +61,21 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--embedding-dims", type=int, default=DEFAULT_GBRAIN_EMBEDDING_DIMS, help="vector size for gbrain-embed*"
+    )
+    parser.add_argument(
+        "--min-relevance",
+        type=float,
+        default=None,
+        metavar="X",
+        help="gbrain-embed*: drop results with GBrain relevance below X (default: no floor)",
+    )
+    parser.add_argument(
+        "--sweep",
+        nargs="?",
+        const=DEFAULT_SWEEP,
+        default=None,
+        metavar="START:STOP:STEP",
+        help=f"after a run or with --show: re-score each GBrain subject at several relevance floors (default {DEFAULT_SWEEP})",
     )
     parser.add_argument(
         "--env-file", type=Path, default=Path(".env"), help="where gbrain-embed* looks for GEMINI_API_KEY"
@@ -109,6 +126,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(log.rstrip("\n"))
             print()
         print(render_report(report, detail=args.detail))
+        if args.sweep:
+            try:
+                print("\n" + render_sweep(report, parse_sweep(args.sweep)))
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return EXIT_NOTHING_RAN
         return EXIT_OK
 
     try:
@@ -119,7 +142,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             repeat=args.repeat,
             embedding_model=args.embedding_model,
             embedding_dims=args.embedding_dims,
+            min_relevance=args.min_relevance,
         )
+        thresholds = parse_sweep(args.sweep) if args.sweep else None
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_NOTHING_RAN
@@ -139,6 +164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print()
     print(render_report(report, detail=args.detail))
+    if thresholds is not None:
+        print("\n" + render_sweep(report, thresholds))
     if not report.subjects:
         return EXIT_NOTHING_RAN
     if not args.no_save:

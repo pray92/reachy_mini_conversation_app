@@ -70,10 +70,21 @@ def describe_query(result: QueryResult, done: int, total: int) -> str:
     shown = ", ".join(result.returned[:MAX_RETURNED_SHOWN])
     if len(result.returned) > MAX_RETURNED_SHOWN:
         shown += f" 외 {len(result.returned) - MAX_RETURNED_SHOWN}개"
+    if result.scores and any(score is not None for score in result.scores):
+        labelled = [
+            fact_id if score is None else f"{fact_id}({score:.2f})"
+            for fact_id, score in zip(result.returned, result.scores)
+        ]
+        shown = ", ".join(labelled[:MAX_RETURNED_SHOWN])
+        if len(result.returned) > MAX_RETURNED_SHOWN:
+            shown += f" 외 {len(result.returned) - MAX_RETURNED_SHOWN}개"
     if result.negative:
         outcome = f"없는 기억인데 나옴: {shown}" if result.false_positive else "결과 없음 (없는 기억, 정상)"
     elif result.rank is not None:
         outcome = f"{result.rank}위"
+        rank_score = result.scores[result.rank - 1] if len(result.scores) >= result.rank else None
+        if rank_score is not None:
+            outcome += f" (relevance {rank_score:.2f})"
     else:
         expected = ", ".join(result.expected)
         outcome = f"못 찾음 (정답 {expected}) · " + (f"나온 것: {shown}" if shown else "결과 없음")

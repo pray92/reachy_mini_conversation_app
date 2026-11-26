@@ -101,6 +101,7 @@ gbrain --version                              # gbrain 0.60.740.0
 | `JISU_MEMORY_BACKEND` | `gbrain` | 대화 앱이 쓸 기억 백엔드 |
 | `JISU_GBRAIN_BIN` | `gbrain` | gbrain 실행 파일 경로 |
 | `JISU_GBRAIN_HOME` | `<앱 데이터 폴더>/gbrain` | `GBRAIN_HOME` 경로 |
+| `JISU_GBRAIN_MIN_RELEVANCE` | (없음) | 질문 검색 결과 중 GBrain relevance가 이 값보다 낮은 것을 버린다. 다 버려지면 키워드 검색으로 대신 찾는다. 임베딩을 켠 brain에서만 의미가 있다(gemini-embedding-2 768차원 기준 실험값 0.54, `src/jisu/bench/README.md`) |
 | `JISU_GBRAIN_TIMEOUT_S` | `30` | CLI 호출 타임아웃(초) |
 
 ## 기억 카테고리와 페르소나 (`jisu.persona`)

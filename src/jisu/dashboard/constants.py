@@ -55,6 +55,13 @@ DEFAULT_GBRAIN_EMBEDDING_DIMS = 768
 GBRAIN_EMBEDDING_KEY_ENV = "GOOGLE_GENERATIVE_AI_API_KEY"
 GBRAIN_EMBEDDING_KEY_FALLBACK_ENV = "GEMINI_API_KEY"
 
+# --- GBrain relevance floor -----------------------------------------------------------
+# recall answers a question with facts that each carry `relevance` (cosine similarity +
+# term share [+ 0.1 when dated]). GBrain's own floor (cosine 0.5) lets unrelated questions
+# through on Gemini embeddings, so facts below this value are dropped on our side.
+GBRAIN_MIN_RELEVANCE_ENV = "JISU_GBRAIN_MIN_RELEVANCE"
+GBRAIN_RELEVANCE_KEY = "relevance"
+
 # --- GBrain resident HTTP server (`gbrain serve --http`) ------------------------------
 GBRAIN_HTTP_HOST = "127.0.0.1"
 # Only the memory verbs (remember / recall / forget ...) are needed.

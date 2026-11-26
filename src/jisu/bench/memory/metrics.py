@@ -37,6 +37,8 @@ class QueryResult:
     false_positive: bool
     latency_ms: float
     note: str = ""
+    # GBrain relevance per returned id (same order as ``returned``); None for unscored results.
+    scores: tuple[float | None, ...] = ()
 
     @property
     def negative(self) -> bool:
@@ -50,9 +52,15 @@ class QueryResult:
 
 
 def score_query(
-    query: BenchQuery, returned: Sequence[str], k: int, *, latency_ms: float, note: str = ""
+    query: BenchQuery,
+    returned: Sequence[str],
+    k: int,
+    *,
+    latency_ms: float,
+    note: str = "",
+    scores: Sequence[float | None] = (),
 ) -> QueryResult:
-    """Score one query from the dataset ids a subject returned."""
+    """Score one query from the dataset ids a subject returned (``scores`` aligned with ``returned``)."""
     top = tuple(returned[:k])
     expected = set(query.expected)
     rank = next((index + 1 for index, fact_id in enumerate(top) if fact_id in expected), None)
@@ -70,6 +78,7 @@ def score_query(
         false_positive=query.negative and bool(top),
         latency_ms=latency_ms,
         note=note,
+        scores=tuple(scores[: len(top)]) if scores else (),
     )
 
 

@@ -215,3 +215,23 @@ def test_default_subjects_stay_keyless() -> None:
     assert BenchConfig().subjects == ("json", "gbrain", "gbrain-native")
     with pytest.raises(ValueError):
         BenchConfig(embedding_dims=0)
+
+
+def test_embed_http_subject_uses_its_factory(dataset: Path, tmp_path: Path) -> None:
+    """gbrain-embed-http gets its brain from the embedding-over-HTTP factory and is closed after measuring."""
+    fakes: list[FakeGBrain] = []
+    closed: list[Path] = []
+    build = _fake_factory(fakes)
+
+    def factory(home: Path) -> GBrainMemoryBackend:
+        brain = build(home)
+        brain.close = lambda: closed.append(home)  # type: ignore[method-assign]
+        return brain
+
+    report = run_memory_bench(
+        BenchConfig(dataset=dataset, subjects=("gbrain-embed-http",), repeat=1),
+        workdir=tmp_path / "work",
+        embed_http_factory=factory,
+    )
+    assert [s.name for s in report.subjects] == ["gbrain-embed-http"]
+    assert len(fakes) == 1 and len(closed) == 1

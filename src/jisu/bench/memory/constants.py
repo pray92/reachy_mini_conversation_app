@@ -10,11 +10,23 @@ from reachy_mini_conversation_app.memory import memory_path_for_instance
 DEFAULT_K = 5
 DEFAULT_REPEAT = 3
 # Every subject the CLI accepts; see subjects.py for what each one measures.
-SUBJECT_NAMES = ("json", "gbrain", "gbrain-native", "gbrain-embed", "gbrain-embed-native", "gbrain-http")
+SUBJECT_NAMES = (
+    "json",
+    "gbrain",
+    "gbrain-native",
+    "gbrain-embed",
+    "gbrain-embed-native",
+    "gbrain-http",
+    "gbrain-embed-http",
+)
 # Run when no --subjects is given. The others need an API key or start a server, so they are opt-in.
 DEFAULT_SUBJECTS = ("json", "gbrain", "gbrain-native")
 LATENCY_PERCENTILES = (50, 95)
 BENCH_PROVENANCE = "jisu memory benchmark"
+
+# --- relevance floor sweep (--sweep) ------------------------------------------------------
+DEFAULT_SWEEP = "0.50:0.80:0.02"
+SWEEP_MAX_STEPS = 200
 
 # --- datasets ---------------------------------------------------------------------
 DATASET_SCHEMA_VERSION = 1

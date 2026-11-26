@@ -34,7 +34,7 @@ import subprocess
 from typing import Any
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 from collections.abc import Mapping, Callable, Sequence
 
 from jisu.persona.prompt import format_categorized_prompt
@@ -50,9 +50,11 @@ from jisu.dashboard.constants import (
     GBRAIN_TIMEOUT_ENV,
     GBRAIN_HOME_DIRNAME,
     GBRAIN_FORGET_REASON,
+    GBRAIN_RELEVANCE_KEY,
     GBRAIN_INIT_TIMEOUT_S,
     DEFAULT_GBRAIN_TIMEOUT_S,
     GBRAIN_EMBEDDING_KEY_ENV,
+    GBRAIN_MIN_RELEVANCE_ENV,
     GBRAIN_EMBEDDING_KEY_FALLBACK_ENV,
 )
 from jisu.dashboard.memory.base import (
@@ -89,11 +91,15 @@ CommandRunner = Callable[[Sequence[str], Mapping[str, str], float], CommandResul
 
 @dataclass(frozen=True)
 class NativeSearch:
-    """GBrain's own ranking for one question, without the local fallback."""
+    """GBrain's ranking for one question (after ``min_relevance``), without the local fallback."""
 
     facts: list[CategorizedFact]
     # ``facts_degraded.reason`` from GBrain (e.g. ``no_query_terms``), "" when not degraded.
     degraded_reason: str = ""
+    # Fact id -> GBrain relevance (cosine similarity + term share [+ 0.1 dated]) for the facts above.
+    scores: dict[str, float] = field(default_factory=dict)
+    # Facts GBrain returned but ``min_relevance`` dropped.
+    dropped: int = 0
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,26 @@ def _error_detail(payload: Mapping[str, Any]) -> str:
     return str(code)
 
 
+def default_min_relevance() -> float | None:
+    """``$JISU_GBRAIN_MIN_RELEVANCE`` as a float, or None when unset or not a number."""
+    raw = os.getenv(GBRAIN_MIN_RELEVANCE_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; no relevance floor is applied", GBRAIN_MIN_RELEVANCE_ENV, raw)
+        return None
+
+
+def _relevance(value: object) -> float | None:
+    if isinstance(value, Mapping):
+        value = value.get(GBRAIN_RELEVANCE_KEY)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _default_timeout_s() -> float:
     raw = os.getenv(GBRAIN_TIMEOUT_ENV, "").strip()
     try:
@@ -297,14 +323,18 @@ class GBrainMemoryBackend:
         require_ready: bool = True,
         embedding: EmbeddingConfig | None = None,
         extra_env: Mapping[str, str] | None = None,
+        min_relevance: float | None = None,
     ) -> None:
         """Bind to one brain; raise :class:`BackendUnavailableError` if it is not usable.
 
         ``require_ready=False`` skips the binary/initialization checks (used to run
         :meth:`initialize` from the dashboard). ``embedding`` only matters for
         :meth:`initialize`; ``extra_env`` is added to every call's environment
-        (e.g. the embedding API key).
+        (e.g. the embedding API key). ``min_relevance`` drops question-ranked
+        facts whose GBrain relevance is below it (default ``$JISU_GBRAIN_MIN_RELEVANCE``,
+        none when unset); listing facts is never filtered.
         """
+        self.min_relevance = min_relevance if min_relevance is not None else default_min_relevance()
         self.embedding = embedding
         self._extra_env = dict(extra_env or {})
         self._runner: CommandRunner = runner or run_command
@@ -440,6 +470,7 @@ class GBrainMemoryBackend:
     def search_native(self, query: str, limit: int) -> NativeSearch:
         """GBrain's own relevance ranking only (no local fallback); raises :class:`GBrainCallError`.
 
+        Facts under :attr:`min_relevance` are dropped (counted in ``dropped``).
         Used by the memory benchmark to measure what the fallback adds.
         """
         question = normalize_memory_text(query)
@@ -448,7 +479,34 @@ class GBrainMemoryBackend:
         payload = self.call("recall", {"question": question, "limit": limit})
         degraded = payload.get("facts_degraded")
         reason = degraded.get("reason") if isinstance(degraded, Mapping) else None
-        return NativeSearch(facts=self._facts_from_payload(payload), degraded_reason=str(reason or ""))
+        raw_facts = payload.get("facts")
+        kept: list[CategorizedFact] = []
+        scores: dict[str, float] = {}
+        dropped = 0
+        for item in raw_facts if isinstance(raw_facts, list) else []:
+            fact = categorized_from_wire(item)
+            if fact is None:
+                continue
+            score = _relevance(item)
+            if self.min_relevance is not None and score is not None and score < self.min_relevance:
+                dropped += 1
+                continue
+            kept.append(fact)
+            if score is not None:
+                scores[fact.fact.id] = score
+        return NativeSearch(facts=kept, degraded_reason=str(reason or ""), scores=scores, dropped=dropped)
+
+    def search_scored(self, query: str, limit: int) -> NativeSearch:
+        """Search like the app, with scores: :meth:`search_native`, then local keywords when it is empty.
+
+        Keyword fallback results carry no score. Raises :class:`GBrainCallError`.
+        """
+        found = self.search_native(query, limit)
+        if found.facts:
+            return found
+        question = normalize_memory_text(query)
+        fallback = _categorized_keyword_search(self.list_categorized(), question, limit) if question else []
+        return NativeSearch(facts=fallback, degraded_reason=found.degraded_reason, dropped=found.dropped)
 
     def _recall(self, params: Mapping[str, Any]) -> list[MemoryFact]:
         return [item.fact for item in self._recall_categorized(params)]
@@ -498,17 +556,7 @@ class GBrainMemoryBackend:
         most Korean queries ("매운 음식") return nothing. When GBrain finds no
         fact, fall back to :func:`keyword_search` over the stored facts.
         """
-        question = normalize_memory_text(query)
-        if not question or limit <= 0:
-            return []
-        try:
-            ranked = self._recall({"question": question, "limit": limit})
-        except GBrainCallError as exc:
-            logger.warning("GBrain search failed: %s", exc)
-            return []
-        if ranked:
-            return ranked
-        return keyword_search(self.list_facts(), question, limit)
+        return [item.fact for item in self.search_categorized(query, limit)]
 
     def format_for_prompt(self) -> str:
         """Render the facts as category sections (persona, promises, user)."""
@@ -566,18 +614,12 @@ class GBrainMemoryBackend:
         return match
 
     def search_categorized(self, query: str, limit: int) -> list[CategorizedFact]:
-        """Relevance-ranked recall with categories, with the same local fallback as :meth:`search`."""
-        question = normalize_memory_text(query)
-        if not question or limit <= 0:
-            return []
+        """Relevance-ranked recall with categories (after ``min_relevance``), with the same local fallback as :meth:`search`."""
         try:
-            ranked = self._recall_categorized({"question": question, "limit": limit})
+            return self.search_scored(query, limit).facts
         except GBrainCallError as exc:
             logger.warning("GBrain search failed: %s", exc)
             return []
-        if ranked:
-            return ranked
-        return _categorized_keyword_search(self.list_categorized(), question, limit)
 
 
 def ensure_brain_initialized(

@@ -22,7 +22,7 @@ import time
 import logging
 from typing import Protocol
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 from collections.abc import Callable
 
 from jisu.dashboard.constants import GBRAIN_EMBEDDING_KEY_ENV, GBRAIN_EMBEDDING_KEY_FALLBACK_ENV
@@ -45,10 +45,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SearchOutcome:
-    """Texts a search returned (rank order) plus an optional note for the report."""
+    """Texts a search returned (rank order), their GBrain relevance, and an optional note for the report."""
 
     texts: list[str]
     note: str = ""
+    # Aligned with ``texts``; None for results GBrain did not score (keyword fallback, JSON).
+    scores: list[float | None] = field(default_factory=list)
 
 
 class Subject(Protocol):
@@ -135,37 +137,82 @@ def create_gbrain(home: Path) -> GBrainMemoryBackend:
     return _initialized(GBrainMemoryBackend(home=home, require_ready=False))
 
 
-def embedded_gbrain_factory(embedding: EmbeddingConfig, dotenv_path: Path | None = None) -> GBrainFactory:
-    """Build a factory for brains initialized with ``embedding`` (skips via BackendUnavailableError without a key)."""
+@dataclass(frozen=True)
+class _EmbeddingOptions:
+    embedding: EmbeddingConfig
+    key: str
+    min_relevance: float | None
+
+
+def _embedding_options(
+    embedding: EmbeddingConfig, dotenv_path: Path | None, min_relevance: float | None
+) -> _EmbeddingOptions:
+    """Collect the settings for an embedding brain (raises BackendUnavailableError without a key)."""
+    found = find_embedding_key(dotenv_path)
+    if found is None:
+        raise BackendUnavailableError(
+            f"no embedding key: set {GBRAIN_EMBEDDING_KEY_FALLBACK_ENV} or {GBRAIN_EMBEDDING_KEY_ENV}"
+        )
+    key, source = found
+    logger.info("임베딩 키: %s 사용, 모델 %s · %d차원", source, embedding.model, embedding.dimensions)
+    if min_relevance is not None:
+        logger.info("relevance 하한 %.3f 적용 (이보다 낮은 결과는 버림)", min_relevance)
+    return _EmbeddingOptions(embedding, key, min_relevance)
+
+
+def embedded_gbrain_factory(
+    embedding: EmbeddingConfig, dotenv_path: Path | None = None, min_relevance: float | None = None
+) -> GBrainFactory:
+    """Build a factory for CLI brains initialized with ``embedding`` (skips via BackendUnavailableError without a key)."""
 
     def create(home: Path) -> GBrainMemoryBackend:
-        found = find_embedding_key(dotenv_path)
-        if found is None:
-            raise BackendUnavailableError(
-                f"no embedding key: set {GBRAIN_EMBEDDING_KEY_FALLBACK_ENV} or {GBRAIN_EMBEDDING_KEY_ENV}"
+        options = _embedding_options(embedding, dotenv_path, min_relevance)
+        return _initialized(
+            GBrainMemoryBackend(
+                home=home,
+                require_ready=False,
+                embedding=options.embedding,
+                extra_env={GBRAIN_EMBEDDING_KEY_ENV: options.key},
+                min_relevance=options.min_relevance,
             )
-        key, source = found
-        logger.info("임베딩 키: %s 사용, 모델 %s · %d차원", source, embedding.model, embedding.dimensions)
-        brain = GBrainMemoryBackend(
-            home=home,
-            require_ready=False,
-            embedding=embedding,
-            extra_env={GBRAIN_EMBEDDING_KEY_ENV: key},
         )
-        return _initialized(brain)
 
     return create
 
 
-def create_http_gbrain(home: Path) -> GBrainMemoryBackend:
-    """Create a keyless brain and start its resident HTTP server (raises BackendUnavailableError)."""
-    brain = _initialized(GBrainHttpBackend(home=home, require_ready=False))
-    assert isinstance(brain, GBrainHttpBackend)
+def _started(brain: GBrainHttpBackend) -> GBrainHttpBackend:
+    """Initialize ``brain`` and start its HTTP server (raises BackendUnavailableError)."""
+    _initialized(brain)
     try:
         brain.start_server()
     except GBrainCallError as exc:
         raise BackendUnavailableError(str(exc)[:300]) from exc
     return brain
+
+
+def create_http_gbrain(home: Path) -> GBrainMemoryBackend:
+    """Create a keyless brain and start its resident HTTP server (raises BackendUnavailableError)."""
+    return _started(GBrainHttpBackend(home=home, require_ready=False))
+
+
+def embedded_http_gbrain_factory(
+    embedding: EmbeddingConfig, dotenv_path: Path | None = None, min_relevance: float | None = None
+) -> GBrainFactory:
+    """Build a factory for embedding brains served over HTTP (the server gets the key; no key -> skipped)."""
+
+    def create(home: Path) -> GBrainMemoryBackend:
+        options = _embedding_options(embedding, dotenv_path, min_relevance)
+        return _started(
+            GBrainHttpBackend(
+                home=home,
+                require_ready=False,
+                embedding=options.embedding,
+                extra_env={GBRAIN_EMBEDDING_KEY_ENV: options.key},
+                min_relevance=options.min_relevance,
+            )
+        )
+
+    return create
 
 
 @dataclass(frozen=True)
@@ -175,6 +222,7 @@ class GBrainFactories:
     keyless: GBrainFactory = create_gbrain
     embedded: GBrainFactory | None = None
     http: GBrainFactory = create_http_gbrain
+    embedded_http: GBrainFactory | None = None
 
 
 def _short_gbrain_error(text: str) -> str:
@@ -211,15 +259,23 @@ class GBrainSubject:
         return self.backend.add_categorized(fact.text, fact.category, provenance=BENCH_PROVENANCE) is not None
 
     def search(self, query: str, k: int) -> SearchOutcome:
-        """GBrain ranking; the app path falls back to local keywords when GBrain finds nothing."""
-        if not self._native:
-            return SearchOutcome([item.fact.text for item in self.backend.search_categorized(query, k)])
+        """GBrain ranking with relevance; the app path falls back to local keywords when GBrain finds nothing."""
         try:
-            found = self.backend.search_native(query, k)
+            found = self.backend.search_native(query, k) if self._native else self.backend.search_scored(query, k)
         except GBrainCallError as exc:
             return SearchOutcome([], note=f"error: {exc}"[:200])
-        note = f"degraded: {found.degraded_reason}" if found.degraded_reason else ""
-        return SearchOutcome([item.fact.text for item in found.facts], note=note)
+        notes = []
+        if found.degraded_reason:
+            notes.append(f"degraded: {found.degraded_reason}")
+        if found.dropped:
+            notes.append(f"하한 미만 {found.dropped}개 버림")
+        if not self._native and found.facts and not found.scores:
+            notes.append("키워드 대체 검색")
+        return SearchOutcome(
+            [item.fact.text for item in found.facts],
+            note=" · ".join(notes),
+            scores=[found.scores.get(item.fact.id) for item in found.facts],
+        )
 
     def format_prompt(self) -> str:
         """Sectioned persona/user prompt."""
@@ -240,6 +296,12 @@ def _embedded(factories: GBrainFactories) -> GBrainFactory:
     return factories.embedded
 
 
+def _embedded_http(factories: GBrainFactories) -> GBrainFactory:
+    if factories.embedded_http is None:
+        raise BackendUnavailableError("no embedding configuration given")
+    return factories.embedded_http
+
+
 SubjectBuilder = Callable[[Path, GBrainFactories], Subject]
 
 # One line per subject for progress output: what is stored where, and how it is searched.
@@ -250,6 +312,7 @@ SUBJECT_DESCRIPTIONS: dict[str, str] = {
     "gbrain-embed": "GBrain CLI · 임베딩 켬 · GBrain 순위 → 비면 키워드 대체 검색",
     "gbrain-embed-native": "GBrain CLI · 임베딩 켬 · GBrain 순위만 (키워드 + 벡터)",
     "gbrain-http": "GBrain 상주 HTTP 서버 · 임베딩 없음 · GBrain 순위 → 비면 키워드 대체 검색",
+    "gbrain-embed-http": "GBrain 상주 HTTP 서버 · 임베딩 켬 · GBrain 순위 → 비면 키워드 대체 검색 (실제 앱 후보 조합)",
 }
 
 SUBJECT_BUILDERS: dict[str, SubjectBuilder] = {
@@ -261,6 +324,9 @@ SUBJECT_BUILDERS: dict[str, SubjectBuilder] = {
         workdir, native=True, factory=_embedded(f), name="gbrain-embed-native"
     ),
     "gbrain-http": lambda workdir, f: GBrainSubject(workdir, native=False, factory=f.http, name="gbrain-http"),
+    "gbrain-embed-http": lambda workdir, f: GBrainSubject(
+        workdir, native=False, factory=_embedded_http(f), name="gbrain-embed-http"
+    ),
 }
 
 

@@ -48,6 +48,7 @@ python -m jisu.bench.memory --show <파일>
 | `gbrain-embed` | GBrain + 임베딩 모델 (기본 `google:gemini-embedding-2`, 768차원) | 앱 경로 |
 | `gbrain-embed-native` | 위와 같음 | GBrain 자체 순위만 (키워드 + 벡터) |
 | `gbrain-http` | GBrain, 상주 HTTP 서버 (`gbrain serve --http`) | 앱 경로 |
+| `gbrain-embed-http` | GBrain + 임베딩, 상주 HTTP 서버 (실제 앱 후보 조합) | 앱 경로 (`--min-relevance` 적용 가능) |
 
 `gbrain`과 `gbrain-native`의 차이가 곧 대체 검색이 보탠 몫이다. `gbrain` ↔ `gbrain-embed*`는 임베딩 효과를, `gbrain` ↔ `gbrain-http`는 호출 방식(호출마다 Bun 기동 vs 서버 하나)의 차이를 본다. 새 백엔드는 `subjects.py`에 `Subject`를 구현하고 `SUBJECT_BUILDERS`에 등록하면 된다.
 
@@ -77,6 +78,28 @@ python -m jisu.bench.memory --subjects gbrain-embed-native --embedding-model <pr
 - GBrain CLI는 현재 폴더의 `.env`를 읽는다. 그래서 모든 GBrain 호출은 brain 폴더를 작업 폴더로 삼아 실행된다. 저장소 `.env`의 다른 키는 GBrain에 넘어가지 않는다.
 - 벡터 칸 길이는 `gbrain init` 때 정해진다. 차원을 바꾸면 새 brain이 필요하다. 벤치는 매번 새 brain을 만드므로 상관없다.
 
+### relevance 하한 실험 (`--sweep`, `--min-relevance`)
+
+GBrain은 질문으로 찾은 사실마다 `relevance`(코사인 유사도 + 단어 일치율, 날짜 있는 사실은 +0.1)를 준다. 임베딩을 켜면 관련 없는 질문도 GBrain 자체 하한(코사인 0.5)을 넘어서 오탐이 100%가 된다. 그래서 우리 쪽에서 하한을 정한다.
+
+```bash
+# 1) 하한 없이 한 번 돌리면서 점수를 모으고, 여러 하한으로 다시 채점해 본다 (GBrain은 한 번만 돈다)
+#    로그의 질문 줄에 점수가 붙는다: "1위 (relevance 0.62)", "없는 기억인데 나옴: dog_name(0.58)"
+python -m jisu.bench.memory --subjects gbrain-embed-native gbrain-embed --repeat 1 --brief --sweep
+
+# 2) 저장된 결과로 하한 범위를 바꿔 가며 다시 본다 (GBrain 호출 없음, 즉시)
+python -m jisu.bench.memory --show <결과.json> --quiet --sweep 0.50:0.66:0.01   # 시작:끝:간격
+python -m jisu.bench.memory --show <결과.json> --quiet --sweep 0.54,0.59        # 값 몇 개만
+
+# 3) 고른 하한을 실제로 걸고 돌린다 (앱 경로의 키워드 대체 검색까지 포함한 진짜 결과)
+python -m jisu.bench.memory --subjects gbrain-embed gbrain-embed-native --min-relevance 0.54 --repeat 1 --brief
+```
+
+- `--sweep` 표 위의 두 줄이 핵심이다. `정답의 relevance`는 맞힌 질문의 정답 점수 범위, `없는 기억에 나온 최고값`은 오탐 점수 범위다. 두 범위가 겹치면 완벽한 하한은 없고, 표에서 절충점을 고른다.
+- `--sweep`은 `-native` 대상에서 정확하다. 앱 경로(`gbrain-embed`)는 하한 때문에 결과가 비면 실제로는 키워드 대체 검색이 도는데, 재채점은 그걸 흉내 내지 않는다. 그래서 3)으로 확인한다.
+- `--min-relevance`는 `gbrain-embed*`에만 걸린다. 키워드 모드의 relevance는 단어 일치율이라 척도가 다르다.
+- 앱·대시보드에 실제로 걸 때는 환경변수 `JISU_GBRAIN_MIN_RELEVANCE=0.54`를 쓴다 (`src/jisu/dashboard/README.md`). 하한은 임베딩 모델과 차원마다 다시 재야 한다.
+
 ### 호출 방식 비교 (`gbrain-http`)
 
 ```bash
@@ -88,6 +111,13 @@ python -m jisu.bench.memory --subjects gbrain-embed-native --embedding-model <pr
 # 속도 비교가 목적이라 표본을 질문당 5번으로 늘린다.
 python -m jisu.bench.memory --subjects json gbrain gbrain-http --repeat 5
 ```
+
+```bash
+# 실제 앱 후보: 임베딩 + HTTP 서버 + relevance 하한
+python -m jisu.bench.memory --subjects gbrain-embed-http --min-relevance 0.54
+```
+
+- HTTP 서버는 같은 질문의 임베딩을 기억해서, `--repeat`로 같은 질문을 반복하면 두 번째부터 빨라진다. 실제 대화에 가까운 값은 질문마다 첫 검색 시간이다(로그의 질문 줄 시간, 결과 JSON의 `queries[].latency_ms`).
 
 - 시작할 때 `gbrain auth create`로 토큰을 만들고, 빈 포트에 `gbrain serve --http --surface verbs`를 `127.0.0.1`로 띄운다. 끝나면 서버를 끄고 토큰을 폐기한다. 서버 로그는 brain 폴더의 `serve-http.log`에 남는다.
 - 정확도는 `gbrain`과 같아야 한다. 다르면 HTTP 응답 해석(`jisu.dashboard.memory.gbrain_http`)을 의심한다.

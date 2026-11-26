@@ -35,6 +35,7 @@ from jisu.bench.memory.subjects import (
     create_gbrain,
     create_http_gbrain,
     embedded_gbrain_factory,
+    embedded_http_gbrain_factory,
 )
 from jisu.dashboard.memory.base import BackendUnavailableError
 from jisu.bench.memory.constants import DEFAULT_K, DEFAULT_REPEAT, DEFAULT_DATASET, DEFAULT_SUBJECTS
@@ -53,6 +54,8 @@ class BenchConfig:
     # Used by the gbrain-embed* subjects only.
     embedding_model: str = DEFAULT_GBRAIN_EMBEDDING_MODEL
     embedding_dims: int = DEFAULT_GBRAIN_EMBEDDING_DIMS
+    # Drop GBrain results below this relevance (gbrain-embed* subjects only); None = no floor.
+    min_relevance: float | None = None
 
     def __post_init__(self) -> None:
         """Reject values that would make the numbers meaningless."""
@@ -117,7 +120,7 @@ def _timed_ms(action: Callable[[], T]) -> tuple[T, float]:
 def _run_query(subject: Subject, dataset_ids: dict[str, str], query: BenchQuery, k: int) -> QueryResult:
     outcome, elapsed = _timed_ms(lambda: subject.search(query.text, k))
     returned = [dataset_ids.get(match_key(text), f"?{text}") for text in outcome.texts]
-    return score_query(query, returned, k, latency_ms=elapsed, note=outcome.note)
+    return score_query(query, returned, k, latency_ms=elapsed, note=outcome.note, scores=outcome.scores)
 
 
 def _measure_subject(subject: Subject, dataset: Dataset, config: BenchConfig, emit: EventHandler) -> SubjectResult:
@@ -199,6 +202,7 @@ def run_memory_bench(
     gbrain_factory: GBrainFactory = create_gbrain,
     embed_factory: GBrainFactory | None = None,
     http_factory: GBrainFactory = create_http_gbrain,
+    embed_http_factory: GBrainFactory | None = None,
     dotenv_path: Path | None = None,
 ) -> BenchReport:
     """Run every subject on the dataset and return the report (not saved).
@@ -223,8 +227,10 @@ def run_memory_bench(
     )
     factories = GBrainFactories(
         keyless=gbrain_factory,
-        embedded=embed_factory or embedded_gbrain_factory(config.embedding, dotenv_path),
+        embedded=embed_factory or embedded_gbrain_factory(config.embedding, dotenv_path, config.min_relevance),
         http=http_factory,
+        embedded_http=embed_http_factory
+        or embedded_http_gbrain_factory(config.embedding, dotenv_path, config.min_relevance),
     )
     started_at = datetime.now().astimezone()
     clock = time.perf_counter()
